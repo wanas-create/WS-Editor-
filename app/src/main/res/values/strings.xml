@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">WS-Editor</string>
+    <string name="domain_subtitle">wseditor.com • Pro Studio</string>
+    <string name="header_hi_master">Hi Master</string>
+    <string name="create_new_project_title">Create New Project</string>
+    <string name="create_new_project_subtitle">Multi-layer 4K Timeline • Custom Fonts • VN Pro</string>
+    <string name="quick_tools_title">Quick Tools</string>
+    <string name="my_projects_title">My Projects</string>
+    <string name="tab_home">Home</string>
+    <string name="tab_video">Video</string>
+    <string name="tab_photo">Photo</string>
+    <string name="tab_wanas_ai">Wanas AI</string>
+    <string name="btn_export_4k">EXPORT 4K</string>
+    <string name="btn_upload_custom_font">Upload Custom Font (.TTF / .OTF)</string>
+    <string name="custom_fonts_section_title">Custom Fonts (Device &amp; Studio)</string>
+    <string name="coming_soon_badge">COMING SOON</string>
+</resources>

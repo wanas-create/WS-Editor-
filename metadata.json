@@ -1,0 +1,6 @@
+{
+  "name": "WS-Editor",
+  "description": "VN-style Pro Video & Photo Editor with multi-layer 4-track timeline, custom font uploads (.ttf/.otf) for text overlays, 4K export, and Wanas AI studio tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
