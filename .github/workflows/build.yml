@@ -10,10 +10,16 @@ jobs:
           java-version: 17
           distribution: temurin
       - uses: gradle/actions/setup-gradle@v3
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Debug, OU=Debug, O=Debug, L=Debug, S=Debug, C=US"
+          cp debug.keystore app/debug.keystore || true
+          cp debug.keystore WS-Editor/debug.keystore || true
+          mkdir -p WS-Editor/app && cp debug.keystore WS-Editor/app/debug.keystore || true
       - name: Build APK
         run: gradle assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: WS-Editor-APK
+          name: WS-Editor APK
           path: app/build/outputs/apk/debug/app-debug.apk
