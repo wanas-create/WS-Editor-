@@ -1,0 +1,6 @@
+{
+  "name": "WS",
+  "description": "Professional video and photo editor powered by WS Series. Features multi-track timeline editing, AI enhancement, effects, and 4K export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
