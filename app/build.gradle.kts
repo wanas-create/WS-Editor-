@@ -9,7 +9,7 @@ plugins {
   alias(libs.plugins.google.services) apply false
 }
 
-// Automatically materialize or generate a valid debug.keystore if missing (e.g. fresh clone / CI)
+// Automatically materialize debug.keystore from repository base64 without external processes (configuration-cache safe)
 val debugKeystore = file("${rootDir}/debug.keystore")
 if (!debugKeystore.exists()) {
   val base64Keystore = file("${rootDir}/debug.keystore.base64")
@@ -18,21 +18,6 @@ if (!debugKeystore.exists()) {
       val base64Clean = base64Keystore.readText().replace("\r", "").replace("\n", "").trim()
       val decodedBytes = Base64.getDecoder().decode(base64Clean)
       debugKeystore.writeBytes(decodedBytes)
-    } catch (_: Exception) {}
-  }
-  if (!debugKeystore.exists()) {
-    try {
-      ProcessBuilder(
-        "keytool", "-genkey", "-v",
-        "-keystore", debugKeystore.absolutePath,
-        "-storepass", "android",
-        "-alias", "androiddebugkey",
-        "-keypass", "android",
-        "-keyalg", "RSA",
-        "-keysize", "2048",
-        "-validity", "10000",
-        "-dname", "CN=Android Debug,O=Android,C=US"
-      ).redirectErrorStream(true).start().waitFor()
     } catch (_: Exception) {}
   }
 }
