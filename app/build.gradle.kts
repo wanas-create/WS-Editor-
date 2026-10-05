@@ -1,11 +1,49 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Base64
 
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
+  alias(libs.plugins.google.services) apply false
+}
+
+// Automatically materialize or generate a valid debug.keystore if missing (e.g. fresh clone / CI)
+val debugKeystore = file("${rootDir}/debug.keystore")
+if (!debugKeystore.exists()) {
+  val base64Keystore = file("${rootDir}/debug.keystore.base64")
+  if (base64Keystore.exists() && base64Keystore.length() > 0) {
+    try {
+      val base64Clean = base64Keystore.readText().replace("\r", "").replace("\n", "").trim()
+      val decodedBytes = Base64.getDecoder().decode(base64Clean)
+      debugKeystore.writeBytes(decodedBytes)
+    } catch (_: Exception) {}
+  }
+  if (!debugKeystore.exists()) {
+    try {
+      ProcessBuilder(
+        "keytool", "-genkey", "-v",
+        "-keystore", debugKeystore.absolutePath,
+        "-storepass", "android",
+        "-alias", "androiddebugkey",
+        "-keypass", "android",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "10000",
+        "-dname", "CN=Android Debug,O=Android,C=US"
+      ).redirectErrorStream(true).start().waitFor()
+    } catch (_: Exception) {}
+  }
+}
+
+// Apply Google Services plugin only if google-services.json is present
+val hasGoogleServices = file("google-services.json").exists() ||
+    file("src/debug/google-services.json").exists() ||
+    file("src/release/google-services.json").exists()
+
+if (hasGoogleServices) {
+  apply(plugin = "com.google.gms.google-services")
 }
 
 android {
@@ -69,8 +107,6 @@ secrets {
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
