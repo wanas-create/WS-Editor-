@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -9,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -96,22 +98,27 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -123,6 +130,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.media.VideoFrameProvider
+import kotlin.math.roundToInt
 import com.example.model.AspectRatioOption
 import com.example.model.FilterPreset
 import com.example.model.SubtitleItem
@@ -212,6 +221,43 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
 
     val selectedClip = clips.getOrNull(selectedIndex) ?: clips.firstOrNull()
     val totalDurationMs = viewModel.totalVideoDurationMs.coerceAtLeast(1000L)
+
+    // Determine active clip and relative time at playheadMs for frame-accurate preview
+    var accumMs = 0L
+    var activeClipAtPlayhead: VideoClip? = null
+    var activeClipRelativeTimeMs = 0L
+
+    for (clip in clips) {
+        val duration = clip.effectiveDurationMs
+        if (playheadMs in accumMs..(accumMs + duration)) {
+            activeClipAtPlayhead = clip
+            val offset = playheadMs - accumMs
+            activeClipRelativeTimeMs = clip.trimStartMs + (offset * clip.speed).toLong().coerceIn(0L, clip.originalDurationMs)
+            break
+        }
+        accumMs += duration
+    }
+    if (activeClipAtPlayhead == null) {
+        activeClipAtPlayhead = selectedClip ?: clips.firstOrNull()
+        activeClipRelativeTimeMs = activeClipAtPlayhead?.trimStartMs ?: 0L
+    }
+
+    var currentFrameBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(activeClipAtPlayhead?.uriString, activeClipRelativeTimeMs) {
+        val uri = activeClipAtPlayhead?.uriString
+        if (!uri.isNullOrEmpty()) {
+            val bmp = VideoFrameProvider.getFrameAtTime(
+                context,
+                uri,
+                activeClipRelativeTimeMs,
+                targetWidth = 720,
+                targetHeight = 480
+            )
+            if (bmp != null) {
+                currentFrameBitmap = bmp
+            }
+        }
+    }
 
     Scaffold(
         containerColor = WsBackground,
@@ -344,20 +390,21 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                         .border(1.dp, Color(0xFF242629)),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (selectedClip != null) {
+                    val clipToRender = activeClipAtPlayhead
+                    if (clipToRender != null) {
                         // Apply transforms & filters
-                        val cm = remember(selectedClip) {
+                        val cm = remember(clipToRender.filter, clipToRender.contrast, clipToRender.saturation, clipToRender.brightness) {
                             val androidMatrix = android.graphics.ColorMatrix()
-                            androidMatrix.setSaturation(selectedClip.saturation)
-                            val contrast = selectedClip.contrast
-                            val translate = (-0.5f * contrast + 0.5f) * 255f + (selectedClip.brightness * 128f)
+                            androidMatrix.setSaturation(clipToRender.saturation)
+                            val contrast = clipToRender.contrast
+                            val translate = (-0.5f * contrast + 0.5f) * 255f + (clipToRender.brightness * 128f)
                             androidMatrix.postConcat(android.graphics.ColorMatrix(floatArrayOf(
                                 contrast, 0f, 0f, 0f, translate,
                                 0f, contrast, 0f, 0f, translate,
                                 0f, 0f, contrast, 0f, translate,
                                 0f, 0f, 0f, 1f, 0f
                             )))
-                            if (selectedClip.filter == FilterPreset.MONO) {
+                            if (clipToRender.filter == FilterPreset.MONO) {
                                 val mono = android.graphics.ColorMatrix()
                                 mono.setSaturation(0f)
                                 androidMatrix.postConcat(mono)
@@ -365,19 +412,35 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                             androidx.compose.ui.graphics.ColorMatrix(androidMatrix.array)
                         }
 
-                        AsyncImage(
-                            model = selectedClip.uriString,
-                            contentDescription = "Video Frame",
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .rotate(selectedClip.rotationDegrees.toFloat())
-                                .graphicsLayer {
-                                    scaleX = if (selectedClip.isFlippedH) -1f else 1f
-                                    scaleY = if (selectedClip.isFlippedV) -1f else 1f
-                                },
-                            contentScale = ContentScale.Fit,
-                            colorFilter = ColorFilter.colorMatrix(cm)
-                        )
+                        if (currentFrameBitmap != null) {
+                            Image(
+                                bitmap = currentFrameBitmap!!.asImageBitmap(),
+                                contentDescription = "Video Frame",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .rotate(clipToRender.rotationDegrees.toFloat())
+                                    .graphicsLayer {
+                                        scaleX = if (clipToRender.isFlippedH) -1f else 1f
+                                        scaleY = if (clipToRender.isFlippedV) -1f else 1f
+                                    },
+                                contentScale = ContentScale.Fit,
+                                colorFilter = ColorFilter.colorMatrix(cm)
+                            )
+                        } else {
+                            AsyncImage(
+                                model = clipToRender.uriString,
+                                contentDescription = "Video Frame",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .rotate(clipToRender.rotationDegrees.toFloat())
+                                    .graphicsLayer {
+                                        scaleX = if (clipToRender.isFlippedH) -1f else 1f
+                                        scaleY = if (clipToRender.isFlippedV) -1f else 1f
+                                    },
+                                contentScale = ContentScale.Fit,
+                                colorFilter = ColorFilter.colorMatrix(cm)
+                            )
+                        }
 
                         // Top Left: Status Indicators
                         Row(
@@ -386,7 +449,7 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                                 .padding(6.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            if (selectedClip.isMuted) {
+                            if (clipToRender.isMuted) {
                                 Box(
                                     modifier = Modifier
                                         .background(Color(0xDD000000), RoundedCornerShape(4.dp))
@@ -399,7 +462,7 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                                     }
                                 }
                             }
-                            if (selectedClip.isChromaKeyEnabled) {
+                            if (clipToRender.isChromaKeyEnabled) {
                                 Box(
                                     modifier = Modifier
                                         .background(Color(0xDD000000), RoundedCornerShape(4.dp))
@@ -411,7 +474,7 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                         }
 
                         // Picture-in-Picture (PIP) Floating Overlay
-                        if (selectedClip.isPip) {
+                        if (clipToRender.isPip) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -422,7 +485,7 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                                     .background(Color(0xFF1E2022))
                             ) {
                                 AsyncImage(
-                                    model = selectedClip.uriString,
+                                    model = clipToRender.uriString,
                                     contentDescription = "PIP Clip",
                                     modifier = Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
@@ -654,241 +717,372 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
             }
 
             // ----------------------------------------------------
-            // 3. MULTI-TRACK TIMELINE
+            // 3. CAPCUT/VN MULTI-TRACK TIMELINE WITH CONTINUOUS THUMBNAILS
             // ----------------------------------------------------
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(0.40f)
                     .background(WsTimelineBg)
             ) {
-                val scrollState = rememberScrollState()
-                val timelineWidthDp = (totalDurationMs / 100L * timelineZoom).dp.coerceAtLeast(480.dp)
+                val containerWidthDp = maxWidth
+                val centerOffsetDp = containerWidthDp / 2
+                val dpPerSecond = (50f * timelineZoom).coerceIn(20f, 200f)
+                val totalSeconds = (totalDurationMs.toFloat() / 1000f).coerceAtLeast(0.1f)
+                val timelineContentWidthDp = (totalSeconds * dpPerSecond).dp.coerceAtLeast(360.dp)
 
-                Column(
+                val scrollState = rememberScrollState()
+
+                // Sync scrollState with playhead when not actively dragged by user
+                LaunchedEffect(playheadMs, isPlaying) {
+                    if (!scrollState.isScrollInProgress) {
+                        val maxScroll = scrollState.maxValue
+                        if (maxScroll > 0 && totalDurationMs > 0) {
+                            val targetScroll = ((playheadMs.toFloat() / totalDurationMs.toFloat()) * maxScroll).roundToInt()
+                            if (Math.abs(scrollState.value - targetScroll) > 2) {
+                                scrollState.scrollTo(targetScroll)
+                            }
+                        }
+                    }
+                }
+
+                // When user scrolls/swipes timeline horizontally, update playhead smoothly
+                LaunchedEffect(scrollState.value, scrollState.isScrollInProgress) {
+                    if (scrollState.isScrollInProgress) {
+                        val maxScroll = scrollState.maxValue
+                        if (maxScroll > 0 && totalDurationMs > 0) {
+                            val progress = (scrollState.value.toFloat() / maxScroll.toFloat()).coerceIn(0f, 1f)
+                            val targetMs = (progress * totalDurationMs).toLong()
+                            viewModel.setPlayheadMs(targetMs)
+                        }
+                    }
+                }
+
+                Row(
                     modifier = Modifier
                         .fillMaxSize()
                         .horizontalScroll(scrollState)
-                        .width(timelineWidthDp)
                 ) {
-                    // Time Ruler
-                    Canvas(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(20.dp)
-                            .background(Color(0xFF1E2022))
-                    ) {
-                        val rulerWidth = this.size.width
-                        val stepCount = (totalDurationMs / 1000L).toInt().coerceAtLeast(1)
-                        val stepPx = rulerWidth / stepCount
-                        for (i in 0..stepCount) {
-                            val x = i * stepPx
-                            val isMajor = i % 5 == 0
-                            drawLine(
-                                color = if (isMajor) Color.White else Color.Gray,
-                                start = Offset(x, 0f),
-                                end = Offset(x, if (isMajor) 12f else 6f),
-                                strokeWidth = 1.5f
-                            )
-                        }
-                    }
+                    // Leading spacer so 0:00.00 aligns exactly with center playhead
+                    Spacer(modifier = Modifier.width(centerOffsetDp))
 
-                    // Track 1: Subtitles & Text Overlays Track
-                    Row(
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(28.dp)
-                            .background(Color(0xFF151618))
-                            .padding(vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .width(timelineContentWidthDp)
+                            .fillMaxHeight()
                     ) {
-                        if (subtitles.isEmpty()) {
-                            Text(
-                                text = "  + Subtitles: Tap Text tool below or Auto-Captions",
-                                fontSize = 9.5.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                        } else {
-                            subtitles.forEach { sub ->
-                                Surface(
-                                    modifier = Modifier
-                                        .padding(horizontal = 4.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .clickable {
-                                            subtitleToEdit = sub
-                                            subtitleEditText = sub.text
-                                        },
-                                    color = Color(0xFF2C3E50)
-                                ) {
-                                    Text(
-                                        text = sub.text,
-                                        fontSize = 9.sp,
-                                        color = WsPureWhite,
-                                        maxLines = 1,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        // Time Ruler
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(24.dp)
+                                .pointerInput(totalDurationMs) {
+                                    detectTapGestures { offset ->
+                                        val ratio = (offset.x / size.width).coerceIn(0f, 1f)
+                                        val targetMs = (ratio * totalDurationMs).toLong()
+                                        viewModel.setPlayheadMs(targetMs)
+                                    }
+                                }
+                        ) {
+                            Canvas(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color(0xFF141619))
+                            ) {
+                                val rulerWidth = size.width
+                                if (rulerWidth <= 0f || totalDurationMs <= 0L) return@Canvas
+
+                                val pxPerSec = (rulerWidth / (totalDurationMs.toFloat() / 1000f)).coerceAtLeast(1f)
+                                val secStep = when {
+                                    pxPerSec >= 80f -> 1
+                                    pxPerSec >= 35f -> 2
+                                    pxPerSec >= 15f -> 5
+                                    pxPerSec >= 6f -> 10
+                                    else -> 30
+                                }
+                                val totalSec = (totalDurationMs / 1000L).toInt()
+
+                                val textPaint = android.graphics.Paint().apply {
+                                    color = android.graphics.Color.parseColor("#94A3B8")
+                                    textSize = 22f
+                                    isAntiAlias = true
+                                }
+
+                                for (s in 0..totalSec step secStep) {
+                                    val x = (s * 1000L.toFloat() / totalDurationMs.toFloat()) * rulerWidth
+                                    val isMajor = (s % (secStep * 5) == 0) || s == 0
+                                    val tickHeight = if (isMajor) 14f else 8f
+                                    val strokeW = if (isMajor) 2f else 1.2f
+
+                                    drawLine(
+                                        color = if (isMajor) Color(0xFFE2E8F0) else Color(0xFF64748B),
+                                        start = Offset(x, 0f),
+                                        end = Offset(x, tickHeight),
+                                        strokeWidth = strokeW
                                     )
+
+                                    if (isMajor) {
+                                        val min = s / 60
+                                        val sec = s % 60
+                                        val label = String.format(Locale.US, "%02d:%02d", min, sec)
+                                        drawContext.canvas.nativeCanvas.drawText(
+                                            label,
+                                            (x + 4f).coerceAtMost(rulerWidth - 42f),
+                                            20f,
+                                            textPaint
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Track 2: Main Video Clips Track
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(68.dp)
-                            .background(WsTimelineTrack)
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        clips.forEachIndexed { index, clip ->
-                            val isSelected = index == selectedIndex
-                            val clipWidth = ((clip.effectiveDurationMs.toFloat() / totalDurationMs.toFloat()) * timelineWidthDp.value).dp.coerceAtLeast(76.dp)
-
-                            Box(
-                                modifier = Modifier
-                                    .width(clipWidth)
-                                    .fillMaxHeight()
-                                    .padding(horizontal = 2.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isSelected) Color(0xFF162238) else Color(0xFF121419))
-                                    .border(
-                                        width = if (isSelected) 2.dp else 1.dp,
-                                        color = if (isSelected) WsElectricCyan else WsBorder,
-                                        shape = RoundedCornerShape(6.dp)
-                                    )
-                                    .clickable { viewModel.selectClip(index) }
-                            ) {
-                                AsyncImage(
-                                    model = clip.uriString,
-                                    contentDescription = clip.name,
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
+                        // Track 1: Subtitles & Text Overlays Track
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                                .background(Color(0xFF151618))
+                                .padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (subtitles.isEmpty()) {
+                                Text(
+                                    text = "  + Subtitles: Tap Text tool below or Auto-Captions",
+                                    fontSize = 9.5.sp,
+                                    color = Color(0xFF6B7280)
                                 )
+                            } else {
+                                subtitles.forEach { sub ->
+                                    val subStartRatio = (sub.startTimelineMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
+                                    val subEndRatio = (sub.endTimelineMs.toFloat() / totalDurationMs.toFloat()).coerceIn(subStartRatio, 1f)
+                                    val subWidth = ((subEndRatio - subStartRatio) * timelineContentWidthDp.value).dp.coerceAtLeast(60.dp)
 
-                                // Clip info overlay (bottom)
-                                Row(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .background(Color(0xDD000000), RoundedCornerShape(bottomStart = 4.dp, topEnd = 4.dp))
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "${clip.name} • ${clip.speed}x",
-                                        fontSize = 8.5.sp,
-                                        color = WsPureWhite,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    if (clip.isMuted) {
-                                        Spacer(modifier = Modifier.width(3.dp))
-                                        Icon(Icons.Default.VolumeOff, contentDescription = null, tint = WsAccentRed, modifier = Modifier.size(9.dp))
+                                    Surface(
+                                        modifier = Modifier
+                                            .width(subWidth)
+                                            .padding(horizontal = 2.dp)
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .clickable {
+                                                subtitleToEdit = sub
+                                                subtitleEditText = sub.text
+                                            },
+                                        color = Color(0xFF2C3E50)
+                                    ) {
+                                        Text(
+                                            text = sub.text,
+                                            fontSize = 9.sp,
+                                            color = WsPureWhite,
+                                            maxLines = 1,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
                                     }
                                 }
+                            }
+                        }
 
-                                if (clip.transition != TransitionType.NONE) {
+                        // Track 2: Main Video Clips Track (Continuous Thumbnails Filmstrip)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(72.dp)
+                                .background(WsTimelineTrack)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            clips.forEachIndexed { index, clip ->
+                                val isSelected = index == selectedIndex
+                                val clipDurationRatio = (clip.effectiveDurationMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
+                                val clipWidthDp = (clipDurationRatio * timelineContentWidthDp.value).dp.coerceAtLeast(70.dp)
+
+                                Box(
+                                    modifier = Modifier
+                                        .width(clipWidthDp)
+                                        .fillMaxHeight()
+                                        .padding(horizontal = 2.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (isSelected) Color(0xFF162238) else Color(0xFF121419))
+                                        .border(
+                                            width = if (isSelected) 2.dp else 1.dp,
+                                            color = if (isSelected) WsElectricCyan else WsBorder,
+                                            shape = RoundedCornerShape(6.dp)
+                                        )
+                                        .clickable { viewModel.selectClip(index) }
+                                ) {
+                                    // Filmstrip of continuous thumbnail tiles across entire clip duration
+                                    val tileWidthDp = 52.dp
+                                    val tileCount = (clipWidthDp.value / tileWidthDp.value).toInt().coerceAtLeast(1)
+                                    val thumbnailTimes = remember(clip.id, clip.trimStartMs, clip.trimEndMs, tileCount) {
+                                        VideoFrameProvider.getClipThumbnailTimes(clip, tileCount)
+                                    }
+
+                                    Row(modifier = Modifier.fillMaxSize()) {
+                                        thumbnailTimes.forEach { timeMs ->
+                                            VideoThumbnailTile(
+                                                uriString = clip.uriString,
+                                                timeMs = timeMs,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .fillMaxHeight()
+                                            )
+                                        }
+                                    }
+
+                                    // Gradient shadow overlay for legible text
                                     Box(
                                         modifier = Modifier
-                                            .align(Alignment.CenterEnd)
-                                            .size(18.dp)
-                                            .background(WsAccentGold, CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("⚡", fontSize = 8.sp)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                                            .fillMaxSize()
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = listOf(
+                                                        Color(0x33000000),
+                                                        Color.Transparent,
+                                                        Color(0xAA000000)
+                                                    )
+                                                )
+                                            )
+                                    )
 
-                    // Track 3: Audio & Music Track
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(34.dp)
-                            .background(Color(0xFF141517))
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (audioTracks.isEmpty()) {
-                            Text(
-                                text = "  + Audio: Import music or record voiceover below",
-                                fontSize = 9.5.sp,
-                                color = Color(0xFF6B7280)
-                            )
-                        } else {
-                            audioTracks.forEach { track ->
-                                Surface(
-                                    modifier = Modifier
-                                        .padding(horizontal = 4.dp)
-                                        .clip(RoundedCornerShape(4.dp)),
-                                    color = if (track.isVoiceRecording) Color(0xFF991B1B) else Color(0xFF1E3A8A)
-                                ) {
+                                    // Trim handles on selected clip
+                                    if (isSelected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.CenterStart)
+                                                .width(6.dp)
+                                                .fillMaxHeight()
+                                                .background(WsElectricCyan, RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp))
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.CenterEnd)
+                                                .width(6.dp)
+                                                .fillMaxHeight()
+                                                .background(WsElectricCyan, RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp))
+                                        )
+                                    }
+
+                                    // Clip info overlay (bottom)
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .background(Color(0xDD000000), RoundedCornerShape(bottomStart = 4.dp, topEnd = 4.dp))
+                                            .padding(horizontal = 4.dp, vertical = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(
-                                            if (track.isVoiceRecording) Icons.Default.Mic else Icons.Default.MusicNote,
-                                            contentDescription = null,
-                                            tint = WsPureWhite,
-                                            modifier = Modifier.size(12.dp)
+                                        Text(
+                                            text = "${clip.name} • ${formatTimecode(clip.effectiveDurationMs)}",
+                                            fontSize = 8.5.sp,
+                                            color = WsPureWhite,
+                                            fontWeight = FontWeight.SemiBold
                                         )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(text = track.title, fontSize = 9.sp, color = WsPureWhite)
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Remove Track",
-                                            tint = Color.LightGray,
+                                        if (clip.speed != 1.0f) {
+                                            Text(
+                                                text = " • ${clip.speed}x",
+                                                fontSize = 8.sp,
+                                                color = WsAccentGold
+                                            )
+                                        }
+                                        if (clip.isMuted) {
+                                            Spacer(modifier = Modifier.width(3.dp))
+                                            Icon(Icons.Default.VolumeOff, contentDescription = null, tint = WsAccentRed, modifier = Modifier.size(9.dp))
+                                        }
+                                    }
+
+                                    if (clip.transition != TransitionType.NONE) {
+                                        Box(
                                             modifier = Modifier
-                                                .size(12.dp)
-                                                .clickable { viewModel.removeAudioTrack(track.id) }
-                                        )
+                                                .align(Alignment.CenterEnd)
+                                                .padding(end = 6.dp)
+                                                .size(18.dp)
+                                                .background(WsAccentGold, CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("⚡", fontSize = 8.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Track 3: Audio & Music Track
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(34.dp)
+                                .background(Color(0xFF141517))
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (audioTracks.isEmpty()) {
+                                Text(
+                                    text = "  + Audio: Import music or record voiceover below",
+                                    fontSize = 9.5.sp,
+                                    color = Color(0xFF6B7280)
+                                )
+                            } else {
+                                audioTracks.forEach { track ->
+                                    val startRatio = (track.startTimelineMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
+                                    val endRatio = ((track.startTimelineMs + track.durationMs).toFloat() / totalDurationMs.toFloat()).coerceIn(startRatio, 1f)
+                                    val trackWidth = ((endRatio - startRatio) * timelineContentWidthDp.value).dp.coerceAtLeast(80.dp)
+
+                                    Surface(
+                                        modifier = Modifier
+                                            .width(trackWidth)
+                                            .padding(horizontal = 3.dp)
+                                            .clip(RoundedCornerShape(4.dp)),
+                                        color = if (track.isVoiceRecording) Color(0xFF991B1B) else Color(0xFF1E3A8A)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                if (track.isVoiceRecording) Icons.Default.Mic else Icons.Default.MusicNote,
+                                                contentDescription = null,
+                                                tint = WsPureWhite,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "${track.title} (${formatTimecode(track.durationMs)})",
+                                                fontSize = 9.sp,
+                                                color = WsPureWhite,
+                                                maxLines = 1
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Icon(
+                                                Icons.Default.Close,
+                                                contentDescription = "Remove Track",
+                                                tint = Color.LightGray,
+                                                modifier = Modifier
+                                                    .size(12.dp)
+                                                    .clickable { viewModel.removeAudioTrack(track.id) }
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    // Trailing spacer so totalDurationMs aligns exactly with center playhead
+                    Spacer(modifier = Modifier.width(centerOffsetDp))
                 }
 
-                // Professional Electric Blue Scrub Playhead Line
-                val progressRatio = (playheadMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
-                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val playheadX = maxWidth * progressRatio
-                    Box(
-                        modifier = Modifier
-                            .padding(start = (playheadX - 1.dp).coerceAtLeast(0.dp))
-                            .width(2.5.dp)
-                            .fillMaxHeight()
-                            .background(WsElectricCyan)
-                    )
-                    // Top Playhead marker
-                    Box(
-                        modifier = Modifier
-                            .padding(start = (playheadX - 5.dp).coerceAtLeast(0.dp))
-                            .size(11.dp)
-                            .clip(RoundedCornerShape(bottomStart = 5.dp, bottomEnd = 5.dp))
-                            .background(WsElectricCyan)
-                    )
-                }
-
-                // Scrub touch handler
+                // Professional Center Playhead Line (CapCut / VN style)
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(totalDurationMs) {
-                            detectTapGestures { offset ->
-                                val ratio = (offset.x / size.width).coerceIn(0f, 1f)
-                                viewModel.setPlayheadMs((ratio * totalDurationMs).toLong())
-                            }
-                        }
-                        .pointerInput(totalDurationMs) {
-                            detectDragGestures { change, _ ->
-                                val ratio = (change.position.x / size.width).coerceIn(0f, 1f)
-                                viewModel.setPlayheadMs((ratio * totalDurationMs).toLong())
-                            }
-                        }
+                        .align(Alignment.Center)
+                        .width(2.5.dp)
+                        .fillMaxHeight()
+                        .background(WsElectricCyan)
+                )
+                // Top Playhead Pin Marker
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .size(width = 12.dp, height = 14.dp)
+                        .clip(RoundedCornerShape(bottomStart = 4.dp, bottomEnd = 4.dp))
+                        .background(WsElectricCyan)
                 )
             }
 
@@ -1716,4 +1910,49 @@ private fun formatTimecode(ms: Long): String {
     val seconds = totalSeconds % 60
     val millis = (ms % 1000) / 10
     return String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, millis)
+}
+
+@Composable
+private fun VideoThumbnailTile(
+    uriString: String,
+    timeMs: Long,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var frameBitmap by remember(uriString, timeMs) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(uriString, timeMs) {
+        val bmp = VideoFrameProvider.getFrameAtTime(
+            context,
+            uriString,
+            timeMs,
+            targetWidth = 140,
+            targetHeight = 100
+        )
+        if (bmp != null) {
+            frameBitmap = bmp
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .background(Color(0xFF16181B))
+            .border(0.5.dp, Color(0xFF2A2D35))
+    ) {
+        if (frameBitmap != null) {
+            Image(
+                bitmap = frameBitmap!!.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            AsyncImage(
+                model = uriString,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        }
+    }
 }

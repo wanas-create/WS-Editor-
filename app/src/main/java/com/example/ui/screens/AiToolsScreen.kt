@@ -77,9 +77,15 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -477,13 +483,12 @@ private fun AiImageGeneratorCard(viewModel: WsEditorViewModel, isProcessing: Boo
                 subtitle = "Synthesize ultra-detailed concept artwork from text prompts."
             )
 
-            OutlinedTextField(
+            AiPromptInputField(
                 value = prompt,
                 onValueChange = { prompt = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Describe anything to generate in high-res...") },
-                shape = RoundedCornerShape(12.dp),
-                maxLines = 3
+                placeholderText = "Describe anything to generate in high-res...",
+                testTag = "ai_image_prompt_input",
+                onClear = { prompt = "" }
             )
 
             // Prompt suggestions
@@ -825,12 +830,12 @@ private fun AiBackgroundGeneratorCard(viewModel: WsEditorViewModel, isProcessing
                 Text(if (selectedPhotoUri != null) "Photo Imported (Ready)" else "Import Subject Photo")
             }
 
-            OutlinedTextField(
+            AiPromptInputField(
                 value = bgPrompt,
                 onValueChange = { bgPrompt = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("e.g. Sunset penthouse, neon city, tropical beach...") },
-                shape = RoundedCornerShape(12.dp)
+                placeholderText = "e.g. Sunset penthouse, neon city, tropical beach...",
+                testTag = "ai_bg_prompt_input",
+                onClear = { bgPrompt = "" }
             )
 
             // Preset ideas
@@ -1126,7 +1131,17 @@ private fun AiAutoCaptionsCard(viewModel: WsEditorViewModel, isProcessing: Boole
                                     },
                                     modifier = Modifier.weight(1f).height(46.dp),
                                     shape = RoundedCornerShape(8.dp),
-                                    singleLine = true
+                                    singleLine = true,
+                                    textStyle = TextStyle(color = Color(0xFF0F172A), fontSize = 13.sp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color(0xFF0F172A),
+                                        unfocusedTextColor = Color(0xFF0F172A),
+                                        focusedContainerColor = Color(0xFFFFFFFF),
+                                        unfocusedContainerColor = Color(0xFFF8FAFC),
+                                        cursorColor = WsElectricBlue,
+                                        focusedBorderColor = WsElectricBlue,
+                                        unfocusedBorderColor = Color(0xFFCBD5E1)
+                                    )
                                 )
                                 IconButton(onClick = { viewModel.deleteAiCaptionItem(cap.id) }) {
                                     Icon(Icons.Default.Delete, contentDescription = null, tint = WsAccentRed, modifier = Modifier.size(16.dp))
@@ -1220,13 +1235,12 @@ private fun AiVoiceToolsCard(viewModel: WsEditorViewModel, isProcessing: Boolean
                 }
             }
 
-            OutlinedTextField(
+            AiPromptInputField(
                 value = speechText,
                 onValueChange = { speechText = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Enter script for AI narrator to speak aloud...") },
-                shape = RoundedCornerShape(12.dp),
-                maxLines = 3
+                placeholderText = "Enter script for AI narrator to speak aloud...",
+                testTag = "ai_speech_prompt_input",
+                onClear = { speechText = "" }
             )
 
             Row(
@@ -1441,12 +1455,12 @@ private fun AiVideoToolsCard(viewModel: WsEditorViewModel, isProcessing: Boolean
                 Text(if (selectedPhotoUri != null) "Keyframe Photo Imported" else "Import Static Photo for Motion")
             }
 
-            OutlinedTextField(
+            AiPromptInputField(
                 value = motionPrompt,
                 onValueChange = { motionPrompt = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("e.g. Slow cinematic zoom-in, drone pan, wave ripple...") },
-                shape = RoundedCornerShape(12.dp)
+                placeholderText = "e.g. Slow cinematic zoom-in, drone pan, wave ripple...",
+                testTag = "ai_motion_prompt_input",
+                onClear = { motionPrompt = "" }
             )
 
             // Duration & Aspect Ratio Pickers
@@ -1759,6 +1773,99 @@ private fun CheckeredBackgroundPattern() {
                     color = color,
                     topLeft = androidx.compose.ui.geometry.Offset(col * squareSize, row * squareSize),
                     size = androidx.compose.ui.geometry.Size(squareSize, squareSize)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiPromptInputField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholderText: String,
+    modifier: Modifier = Modifier,
+    minLines: Int = 3,
+    maxLines: Int = 6,
+    testTag: String = "ai_prompt_input",
+    onClear: (() -> Unit)? = null
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(testTag),
+            placeholder = {
+                Text(
+                    text = placeholderText,
+                    color = Color(0xFF64748B),
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            },
+            textStyle = TextStyle(
+                color = Color(0xFF0F172A),
+                fontSize = 14.5.sp,
+                fontWeight = FontWeight.Normal,
+                lineHeight = 21.sp
+            ),
+            shape = RoundedCornerShape(12.dp),
+            minLines = minLines,
+            maxLines = maxLines,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Sentences,
+                autoCorrectEnabled = true,
+                keyboardType = KeyboardType.Text,
+                imeAction = ImeAction.Default
+            ),
+            trailingIcon = if (value.isNotEmpty()) {
+                {
+                    IconButton(
+                        onClick = {
+                            if (onClear != null) onClear() else onValueChange("")
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear Prompt",
+                            tint = Color(0xFF64748B),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            } else null,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color(0xFF0F172A),
+                unfocusedTextColor = Color(0xFF0F172A),
+                focusedContainerColor = Color(0xFFFFFFFF),
+                unfocusedContainerColor = Color(0xFFF8FAFC),
+                cursorColor = WsElectricBlue,
+                focusedBorderColor = WsElectricBlue,
+                unfocusedBorderColor = Color(0xFFCBD5E1),
+                selectionColors = TextSelectionColors(
+                    handleColor = WsElectricBlue,
+                    backgroundColor = Color(0x330070F3)
+                )
+            )
+        )
+        if (value.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text(
+                    text = "${value.length} characters",
+                    fontSize = 10.5.sp,
+                    color = Color(0xFF64748B),
+                    fontWeight = FontWeight.Medium
                 )
             }
         }

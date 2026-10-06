@@ -231,6 +231,10 @@ object AiEngine {
                 put(contentObj)
             }
             put("contents", contentsArray)
+            val genConfig = JSONObject().apply {
+                put("responseMimeType", "application/json")
+            }
+            put("generationConfig", genConfig)
         }
 
         val requestBody = RequestBody.create(
@@ -340,6 +344,7 @@ object AiEngine {
 
     /**
      * AI Background Generator: Generates a new styled background and composites foreground subject.
+     * Uses free AI backdrop generator (Pollinations AI) with graceful on-device fallback.
      */
     suspend fun generateAiBackground(
         context: Context,
@@ -347,46 +352,69 @@ object AiEngine {
         bgPrompt: String
     ): String = withContext(Dispatchers.IO) {
         val fg = removeBackground(source)
+        val targetWidth = fg.width.coerceIn(512, 1080)
+        val targetHeight = fg.height.coerceIn(512, 1080)
+
+        var bgBitmap: Bitmap? = null
+        try {
+            val encodedPrompt = java.net.URLEncoder.encode("$bgPrompt, clean scenic environment backdrop, high resolution photography", "UTF-8")
+            val url = "https://image.pollinations.ai/prompt/$encodedPrompt?width=$targetWidth&height=$targetHeight&seed=${System.currentTimeMillis()}&nologo=true"
+            val request = Request.Builder().url(url).build()
+            val response = okHttpClient.newCall(request).execute()
+            if (response.isSuccessful) {
+                val bytes = response.body?.bytes()
+                if (bytes != null && bytes.isNotEmpty()) {
+                    bgBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AiEngine", "Pollinations background generation note: ${e.message}")
+        }
+
         val output = Bitmap.createBitmap(fg.width, fg.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        // Generate stylized background matching prompt keywords
-        val lower = bgPrompt.lowercase()
-        val bgColors = when {
-            "sunset" in lower || "warm" in lower || "gold" in lower -> {
-                intArrayOf(Color.parseColor("#FF512F"), Color.parseColor("#F09819"), Color.parseColor("#701130"))
+        if (bgBitmap != null) {
+            val scaledBg = Bitmap.createScaledBitmap(bgBitmap, fg.width, fg.height, true)
+            canvas.drawBitmap(scaledBg, 0f, 0f, null)
+        } else {
+            // Adaptive gradient backdrop fallback
+            val lower = bgPrompt.lowercase()
+            val bgColors = when {
+                "sunset" in lower || "warm" in lower || "gold" in lower -> {
+                    intArrayOf(Color.parseColor("#FF512F"), Color.parseColor("#F09819"), Color.parseColor("#701130"))
+                }
+                "cyber" in lower || "neon" in lower || "city" in lower -> {
+                    intArrayOf(Color.parseColor("#0F2027"), Color.parseColor("#203A43"), Color.parseColor("#2C5364"))
+                }
+                "studio" in lower || "white" in lower || "clean" in lower -> {
+                    intArrayOf(Color.parseColor("#F8F9FA"), Color.parseColor("#E9ECEF"), Color.parseColor("#DEE2E6"))
+                }
+                "nature" in lower || "forest" in lower || "beach" in lower -> {
+                    intArrayOf(Color.parseColor("#134E5E"), Color.parseColor("#71B280"))
+                }
+                else -> {
+                    intArrayOf(Color.parseColor("#1A1A2E"), Color.parseColor("#16213E"), Color.parseColor("#0F3460"))
+                }
             }
-            "cyber" in lower || "neon" in lower || "city" in lower -> {
-                intArrayOf(Color.parseColor("#0F2027"), Color.parseColor("#203A43"), Color.parseColor("#2C5364"))
+
+            val shader = android.graphics.LinearGradient(
+                0f, 0f, fg.width.toFloat(), fg.height.toFloat(),
+                bgColors[0], bgColors.last(),
+                android.graphics.Shader.TileMode.CLAMP
+            )
+            paint.shader = shader
+            canvas.drawRect(0f, 0f, fg.width.toFloat(), fg.height.toFloat(), paint)
+            paint.shader = null
+
+            val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#33FFFFFF")
             }
-            "studio" in lower || "white" in lower || "clean" in lower -> {
-                intArrayOf(Color.parseColor("#F8F9FA"), Color.parseColor("#E9ECEF"), Color.parseColor("#DEE2E6"))
-            }
-            "nature" in lower || "forest" in lower || "beach" in lower -> {
-                intArrayOf(Color.parseColor("#134E5E"), Color.parseColor("#71B280"))
-            }
-            else -> {
-                intArrayOf(Color.parseColor("#1A1A2E"), Color.parseColor("#16213E"), Color.parseColor("#0F3460"))
-            }
+            canvas.drawCircle(fg.width * 0.75f, fg.height * 0.25f, fg.width * 0.4f, orbPaint)
         }
 
-        val shader = android.graphics.LinearGradient(
-            0f, 0f, fg.width.toFloat(), fg.height.toFloat(),
-            bgColors[0], bgColors.last(),
-            android.graphics.Shader.TileMode.CLAMP
-        )
-        paint.shader = shader
-        canvas.drawRect(0f, 0f, fg.width.toFloat(), fg.height.toFloat(), paint)
-        paint.shader = null
-
-        // Add soft lighting orbs to make the AI background feel natural
-        val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#33FFFFFF")
-        }
-        canvas.drawCircle(fg.width * 0.75f, fg.height * 0.25f, fg.width * 0.4f, orbPaint)
-
-        // Draw foreground subject
+        // Composite foreground subject onto background
         canvas.drawBitmap(fg, 0f, 0f, null)
 
         val file = File(context.cacheDir, "ws_ai_bg_${System.currentTimeMillis()}.png")
@@ -397,8 +425,8 @@ object AiEngine {
     }
 
     /**
-     * AI Image Generation (Synthesis / Artistic Canvas Generator)
-     * Supports multiple image variations (1, 2, 4)
+     * AI Image Generation (Synthesis / Concept Artwork)
+     * Generates multiple image variations (1, 2, 4) using free AI options (Pollinations AI + Gemini + on-device).
      */
     suspend fun generateMultipleAiImages(
         context: Context,
@@ -407,13 +435,27 @@ object AiEngine {
     ): List<String> = withContext(Dispatchers.IO) {
         val apiKey = getGeminiApiKey()
         if (apiKey.isNotEmpty()) {
-            val apiResults = callGeminiImageApi(context, prompt, count, apiKey)
-            if (apiResults.isNotEmpty()) {
-                return@withContext apiResults
+            try {
+                val apiResults = callGeminiImageApi(context, prompt, count, apiKey)
+                if (apiResults.isNotEmpty()) {
+                    return@withContext apiResults
+                }
+            } catch (e: Exception) {
+                Log.w("AiEngine", "Gemini Image API note (${e.message}), trying free Pollinations provider")
             }
         }
 
-        // On-device neural synthesis engine
+        // Primary Free AI Provider: Pollinations AI (Zero cost, no API key required, high quality Flux/SD)
+        try {
+            val pollinationsResults = callPollinationsImageApi(context, prompt, count)
+            if (pollinationsResults.isNotEmpty()) {
+                return@withContext pollinationsResults
+            }
+        } catch (e: Exception) {
+            Log.w("AiEngine", "Pollinations image generation note: ${e.message}")
+        }
+
+        // On-device neural synthesis engine fallback (offline / network failure)
         val resultPaths = mutableListOf<String>()
         val width = 1080
         val height = 1080
@@ -470,6 +512,41 @@ object AiEngine {
             resultPaths.add(file.absolutePath)
         }
         resultPaths
+    }
+
+    private fun callPollinationsImageApi(
+        context: Context,
+        prompt: String,
+        count: Int
+    ): List<String> {
+        val resultPaths = mutableListOf<String>()
+        val encodedPrompt = java.net.URLEncoder.encode(prompt, "UTF-8")
+        val baseSeed = System.currentTimeMillis()
+
+        for (i in 0 until count.coerceIn(1, 4)) {
+            val seed = baseSeed + (i * 739L)
+            val url = "https://image.pollinations.ai/prompt/$encodedPrompt?width=1024&height=1024&seed=$seed&nologo=true"
+            try {
+                val request = Request.Builder().url(url).build()
+                val response = okHttpClient.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val bytes = response.body?.bytes()
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bitmap != null) {
+                            val file = File(context.cacheDir, "ws_ai_gen_${System.currentTimeMillis()}_$i.jpg")
+                            FileOutputStream(file).use { out ->
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                            }
+                            resultPaths.add(file.absolutePath)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("AiEngine", "Pollinations variation $i failed: ${e.message}")
+            }
+        }
+        return resultPaths
     }
 
     private fun callGeminiImageApi(

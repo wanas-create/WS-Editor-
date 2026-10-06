@@ -10,6 +10,7 @@ import com.example.data.ProjectEntity
 import com.example.data.ProjectRepository
 import com.example.data.WsDatabase
 import com.example.media.MediaExportEngine
+import com.example.media.VideoFrameProvider
 import com.example.media.VoiceRecorder
 import com.example.model.AspectRatioOption
 import com.example.model.AudioTrackItem
@@ -286,11 +287,14 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     fun createVideoProject(uris: List<Uri>, projectName: String = "WS Video Project") {
         viewModelScope.launch {
             val clips = uris.mapIndexed { index, uri ->
+                val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+                val duration = if (realDuration > 0L) realDuration else 10000L
                 VideoClip(
                     uriString = uri.toString(),
                     name = "Clip ${index + 1}",
-                    originalDurationMs = 5000L,
-                    trimEndMs = 5000L
+                    originalDurationMs = duration,
+                    trimStartMs = 0L,
+                    trimEndMs = duration
                 )
             }
             _videoClips.value = clips
@@ -300,12 +304,13 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
             _subtitles.value = emptyList()
             _aspectRatio.value = AspectRatioOption.RATIO_16_9
 
+            val totalDur = clips.sumOf { it.effectiveDurationMs }
             val newEntity = ProjectEntity(
                 title = projectName,
                 type = "VIDEO",
                 thumbnailUri = uris.firstOrNull()?.toString(),
                 aspectRatio = "16:9",
-                durationMs = clips.sumOf { it.effectiveDurationMs },
+                durationMs = totalDur,
                 isDraft = false
             )
             val id = repository.saveProject(newEntity)
@@ -337,12 +342,19 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             _activeProject.value = project
             if (project.type == "VIDEO") {
-                // Restore or initialize clips
+                // Restore or initialize clips with real duration
+                val realDur = if (project.durationMs > 0L) {
+                    project.durationMs
+                } else {
+                    VideoFrameProvider.getVideoDurationMs(getApplication(), project.thumbnailUri ?: "")
+                }
+                val finalDuration = if (realDur > 0L) realDur else 10000L
                 val dummyClip = VideoClip(
                     uriString = project.thumbnailUri ?: "",
                     name = project.title,
-                    originalDurationMs = if (project.durationMs > 0) project.durationMs else 6000L,
-                    trimEndMs = if (project.durationMs > 0) project.durationMs else 6000L
+                    originalDurationMs = finalDuration,
+                    trimStartMs = 0L,
+                    trimEndMs = finalDuration
                 )
                 _videoClips.value = listOf(dummyClip)
                 _selectedClipIndex.value = 0
@@ -436,10 +448,14 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
         _isPlaying.value = true
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
+            var lastTime = System.currentTimeMillis()
             while (_isPlaying.value) {
-                delay(33) // ~30 fps scrub
-                val total = totalVideoDurationMs.coerceAtLeast(1000L)
-                val next = _playheadMs.value + 33L
+                delay(30)
+                val now = System.currentTimeMillis()
+                val elapsed = (now - lastTime).coerceIn(1L, 100L)
+                lastTime = now
+                val total = totalVideoDurationMs.coerceAtLeast(100L)
+                val next = _playheadMs.value + elapsed
                 if (next >= total) {
                     _playheadMs.value = 0L
                     _isPlaying.value = false
@@ -713,33 +729,42 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun addMediaClips(uris: List<Uri>) {
-        pushUndoState()
-        val current = _videoClips.value.toMutableList()
-        uris.forEachIndexed { i, uri ->
-            current.add(
-                VideoClip(
-                    uriString = uri.toString(),
-                    name = "Clip ${current.size + 1}",
-                    originalDurationMs = 5000L,
-                    trimEndMs = 5000L
+        viewModelScope.launch {
+            pushUndoState()
+            val current = _videoClips.value.toMutableList()
+            uris.forEachIndexed { _, uri ->
+                val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+                val duration = if (realDuration > 0L) realDuration else 10000L
+                current.add(
+                    VideoClip(
+                        uriString = uri.toString(),
+                        name = "Clip ${current.size + 1}",
+                        originalDurationMs = duration,
+                        trimStartMs = 0L,
+                        trimEndMs = duration
+                    )
                 )
-            )
+            }
+            _videoClips.value = current
+            autoSaveCurrentProject()
         }
-        _videoClips.value = current
-        autoSaveCurrentProject()
     }
 
     fun importAudioFile(uri: Uri, title: String = "Imported Music") {
-        pushUndoState()
-        val track = AudioTrackItem(
-            title = title,
-            uriString = uri.toString(),
-            startTimelineMs = _playheadMs.value,
-            durationMs = 15000L,
-            isVoiceRecording = false
-        )
-        _audioTracks.value = _audioTracks.value + track
-        autoSaveCurrentProject()
+        viewModelScope.launch {
+            pushUndoState()
+            val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+            val duration = if (realDuration > 0L) realDuration else totalVideoDurationMs.coerceAtLeast(15000L)
+            val track = AudioTrackItem(
+                title = title,
+                uriString = uri.toString(),
+                startTimelineMs = _playheadMs.value,
+                durationMs = duration,
+                isVoiceRecording = false
+            )
+            _audioTracks.value = _audioTracks.value + track
+            autoSaveCurrentProject()
+        }
     }
 
     fun updateSubtitle(id: String, newText: String, color: Long? = null, fontSize: Float? = null) {
@@ -798,8 +823,25 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
 
     // Video-to-Photo extraction
     fun captureCurrentFrameAsPhoto(): String {
-        val clip = _videoClips.value.getOrNull(_selectedClipIndex.value)
-        return clip?.uriString ?: ""
+        val playhead = _playheadMs.value
+        var accum = 0L
+        var targetClip: VideoClip? = null
+        var clipTimeMs = 0L
+        for (clip in _videoClips.value) {
+            val dur = clip.effectiveDurationMs
+            if (playhead in accum..(accum + dur)) {
+                targetClip = clip
+                val offset = playhead - accum
+                clipTimeMs = clip.trimStartMs + (offset * clip.speed).toLong()
+                break
+            }
+            accum += dur
+        }
+        if (targetClip == null) {
+            targetClip = _videoClips.value.getOrNull(_selectedClipIndex.value) ?: _videoClips.value.firstOrNull()
+            clipTimeMs = targetClip?.trimStartMs ?: 0L
+        }
+        return targetClip?.uriString ?: ""
     }
 
     // ----------------------------------------------------
@@ -1153,14 +1195,19 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun importGeneratedVideoToEditor(videoPath: String) {
-        val clip = VideoClip(
-            uriString = videoPath,
-            name = "AI Motion Clip",
-            originalDurationMs = 5000L,
-            trimEndMs = 5000L
-        )
-        _videoClips.value = _videoClips.value + clip
-        navigateTo(ScreenState.VIDEO_EDITOR)
+        viewModelScope.launch {
+            val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), videoPath)
+            val duration = if (realDuration > 0L) realDuration else 6000L
+            val clip = VideoClip(
+                uriString = videoPath,
+                name = "AI Motion Clip",
+                originalDurationMs = duration,
+                trimStartMs = 0L,
+                trimEndMs = duration
+            )
+            _videoClips.value = _videoClips.value + clip
+            navigateTo(ScreenState.VIDEO_EDITOR)
+        }
     }
 
     fun clearAiError() {
