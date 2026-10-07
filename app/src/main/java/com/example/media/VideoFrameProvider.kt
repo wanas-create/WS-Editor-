@@ -14,7 +14,7 @@ import java.io.File
 object VideoFrameProvider {
 
     // In-memory LRU cache holding decoded thumbnail bitmaps
-    private val frameCache = object : LruCache<String, Bitmap>(120) {}
+    private val frameCache = object : LruCache<String, Bitmap>(300) {}
 
     /**
      * Extracts the real duration in milliseconds from a media URI or path.
@@ -41,20 +41,18 @@ object VideoFrameProvider {
 
     /**
      * Extracts a frame bitmap from the video at [timeMs].
-     * Uses scaled frame extraction for fast performance and low memory consumption.
+     * Uses OPTION_CLOSEST and scaled frame extraction for continuous frame accuracy.
      */
     suspend fun getFrameAtTime(
         context: Context,
         uriString: String?,
         timeMs: Long,
-        targetWidth: Int = 180,
-        targetHeight: Int = 120
+        targetWidth: Int = 160,
+        targetHeight: Int = 100
     ): Bitmap? = withContext(Dispatchers.IO) {
         if (uriString.isNullOrBlank()) return@withContext null
 
-        // Quantize timeMs by ~150ms for scrubber cache efficiency
-        val quantizedTimeMs = (timeMs / 150L) * 150L
-        val cacheKey = "$uriString-$quantizedTimeMs-$targetWidth-$targetHeight"
+        val cacheKey = "$uriString-$timeMs-$targetWidth-$targetHeight"
         frameCache.get(cacheKey)?.let { return@withContext it }
 
         var retriever: MediaMetadataRetriever? = null
@@ -64,14 +62,32 @@ object VideoFrameProvider {
             val timeUs = (timeMs * 1000L).coerceAtLeast(0L)
 
             val bitmap: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && targetWidth > 0 && targetHeight > 0) {
-                retriever.getScaledFrameAtTime(
-                    timeUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    targetWidth,
-                    targetHeight
-                ) ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                try {
+                    retriever.getScaledFrameAtTime(
+                        timeUs,
+                        MediaMetadataRetriever.OPTION_CLOSEST,
+                        targetWidth,
+                        targetHeight
+                    )
+                } catch (_: Throwable) { null }
+                    ?: try {
+                        retriever.getScaledFrameAtTime(
+                            timeUs,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                            targetWidth,
+                            targetHeight
+                        )
+                    } catch (_: Throwable) { null }
+                    ?: try {
+                        retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                    } catch (_: Throwable) { null }
             } else {
-                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                try {
+                    retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                } catch (_: Throwable) { null }
+                    ?: try {
+                        retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    } catch (_: Throwable) { null }
             }
 
             if (bitmap != null) {
@@ -106,16 +122,16 @@ object VideoFrameProvider {
 
     /**
      * Calculates timestamps for a continuous thumbnail sequence across the clip's trimmed range.
+     * Samples across the duration so every tile represents a distinct point in time.
      */
     fun getClipThumbnailTimes(clip: VideoClip, count: Int): List<Long> {
         val safeCount = count.coerceAtLeast(1)
         val startMs = clip.trimStartMs.coerceAtLeast(0L)
-        val endMs = clip.trimEndMs.coerceAtAtLeast(startMs + 100L)
+        val endMs = clip.trimEndMs.coerceAtLeast(startMs + 50L)
         val range = (endMs - startMs).toFloat()
-        val step = range / safeCount.toFloat()
 
         return (0 until safeCount).map { i ->
-            (startMs + (i * step)).toLong().coerceIn(startMs, endMs)
+            (startMs + ((i.toFloat() + 0.5f) / safeCount.toFloat() * range)).toLong().coerceIn(startMs, endMs)
         }
     }
 

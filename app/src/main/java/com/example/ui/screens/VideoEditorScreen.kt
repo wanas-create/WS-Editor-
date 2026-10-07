@@ -98,6 +98,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -129,6 +130,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import coil.compose.AsyncImage
 import com.example.media.VideoFrameProvider
 import kotlin.math.roundToInt
@@ -164,7 +176,7 @@ import com.example.viewmodel.VideoEditorTool
 import com.example.viewmodel.WsEditorViewModel
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, UnstableApi::class)
 @Composable
 fun VideoEditorScreen(viewModel: WsEditorViewModel) {
     val context = LocalContext.current
@@ -222,15 +234,17 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
     val selectedClip = clips.getOrNull(selectedIndex) ?: clips.firstOrNull()
     val totalDurationMs = viewModel.totalVideoDurationMs.coerceAtLeast(1000L)
 
-    // Determine active clip and relative time at playheadMs for frame-accurate preview
+    // Determine active clip, timeline start offset and relative time at playheadMs for frame-accurate playback
     var accumMs = 0L
     var activeClipAtPlayhead: VideoClip? = null
+    var activeClipStartTimelineMs = 0L
     var activeClipRelativeTimeMs = 0L
 
     for (clip in clips) {
         val duration = clip.effectiveDurationMs
         if (playheadMs in accumMs..(accumMs + duration)) {
             activeClipAtPlayhead = clip
+            activeClipStartTimelineMs = accumMs
             val offset = playheadMs - accumMs
             activeClipRelativeTimeMs = clip.trimStartMs + (offset * clip.speed).toLong().coerceIn(0L, clip.originalDurationMs)
             break
@@ -239,23 +253,96 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
     }
     if (activeClipAtPlayhead == null) {
         activeClipAtPlayhead = selectedClip ?: clips.firstOrNull()
+        activeClipStartTimelineMs = 0L
         activeClipRelativeTimeMs = activeClipAtPlayhead?.trimStartMs ?: 0L
     }
 
-    var currentFrameBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(activeClipAtPlayhead?.uriString, activeClipRelativeTimeMs) {
-        val uri = activeClipAtPlayhead?.uriString
-        if (!uri.isNullOrEmpty()) {
-            val bmp = VideoFrameProvider.getFrameAtTime(
-                context,
-                uri,
-                activeClipRelativeTimeMs,
-                targetWidth = 720,
-                targetHeight = 480
-            )
-            if (bmp != null) {
-                currentFrameBitmap = bmp
+    // AndroidX Media3 ExoPlayer instance for hardware-accelerated video & audio playback
+    val exoPlayer = remember(context) {
+        ExoPlayer.Builder(context).build().apply {
+            repeatMode = Player.REPEAT_MODE_OFF
+            playWhenReady = false
+            playbackParameters = PlaybackParameters(1.0f)
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                android.util.Log.e("VideoEditor", "ExoPlayer playback error (${error.errorCodeName}): ${error.message}", error)
+                Toast.makeText(context, "Playback notice: ${error.localizedMessage ?: "Decoder format error"}", Toast.LENGTH_SHORT).show()
             }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    viewModel.setPlaying(false)
+                    viewModel.setPlayheadMs(0L)
+                    exoPlayer.seekTo(0L)
+                }
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
+
+    // Prepare and bind active clip MediaItem
+    var loadedUri by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(activeClipAtPlayhead?.uriString) {
+        val uriStr = activeClipAtPlayhead?.uriString
+        if (!uriStr.isNullOrEmpty() && uriStr != loadedUri) {
+            try {
+                val mediaItem = MediaItem.fromUri(Uri.parse(uriStr))
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.prepare()
+                loadedUri = uriStr
+                exoPlayer.seekTo(activeClipRelativeTimeMs.coerceAtLeast(0L))
+            } catch (e: Exception) {
+                android.util.Log.e("VideoEditor", "Error loading media: ${e.message}", e)
+            }
+        }
+    }
+
+    // Audio volume & Speed binding (preserve audio track, ensure audio is enabled and not accidentally muted)
+    LaunchedEffect(activeClipAtPlayhead?.isMuted, activeClipAtPlayhead?.volume, activeClipAtPlayhead?.speed) {
+        val clip = activeClipAtPlayhead
+        exoPlayer.volume = if (clip?.isMuted == true) 0f else (clip?.volume ?: 1.0f)
+        val spd = (clip?.speed ?: 1.0f).coerceIn(0.25f, 4.0f)
+        exoPlayer.playbackParameters = PlaybackParameters(spd)
+    }
+
+    // Synchronize playback position with playheadMs while playing
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            exoPlayer.play()
+            while (isPlaying) {
+                val currentPos = exoPlayer.currentPosition
+                val clip = activeClipAtPlayhead
+                if (clip != null) {
+                    val newPlayhead = activeClipStartTimelineMs + (currentPos - clip.trimStartMs).coerceAtLeast(0L)
+                    if (newPlayhead >= totalDurationMs || currentPos >= clip.trimEndMs) {
+                        viewModel.setPlaying(false)
+                        viewModel.setPlayheadMs(0L)
+                        exoPlayer.pause()
+                        exoPlayer.seekTo(clip.trimStartMs)
+                        break
+                    } else {
+                        viewModel.updatePlayheadFromPlayer(newPlayhead)
+                    }
+                }
+                delay(16)
+            }
+        } else {
+            exoPlayer.pause()
+        }
+    }
+
+    // Seek / Scrub frame update when paused
+    LaunchedEffect(activeClipRelativeTimeMs, isPlaying) {
+        if (!isPlaying && loadedUri != null) {
+            exoPlayer.seekTo(activeClipRelativeTimeMs.coerceAtLeast(0L))
         }
     }
 
@@ -412,35 +499,32 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                             androidx.compose.ui.graphics.ColorMatrix(androidMatrix.array)
                         }
 
-                        if (currentFrameBitmap != null) {
-                            Image(
-                                bitmap = currentFrameBitmap!!.asImageBitmap(),
-                                contentDescription = "Video Frame",
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .rotate(clipToRender.rotationDegrees.toFloat())
-                                    .graphicsLayer {
-                                        scaleX = if (clipToRender.isFlippedH) -1f else 1f
-                                        scaleY = if (clipToRender.isFlippedV) -1f else 1f
-                                    },
-                                contentScale = ContentScale.Fit,
-                                colorFilter = ColorFilter.colorMatrix(cm)
-                            )
-                        } else {
-                            AsyncImage(
-                                model = clipToRender.uriString,
-                                contentDescription = "Video Frame",
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .rotate(clipToRender.rotationDegrees.toFloat())
-                                    .graphicsLayer {
-                                        scaleX = if (clipToRender.isFlippedH) -1f else 1f
-                                        scaleY = if (clipToRender.isFlippedV) -1f else 1f
-                                    },
-                                contentScale = ContentScale.Fit,
-                                colorFilter = ColorFilter.colorMatrix(cm)
-                            )
-                        }
+                        // Hardware-accelerated Video & Audio PlayerView
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    player = exoPlayer
+                                    useController = false
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    layoutParams = android.view.ViewGroup.LayoutParams(
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                }
+                            },
+                            update = { view ->
+                                if (view.player != exoPlayer) {
+                                    view.player = exoPlayer
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .rotate(clipToRender.rotationDegrees.toFloat())
+                                .graphicsLayer {
+                                    scaleX = if (clipToRender.isFlippedH) -1f else 1f
+                                    scaleY = if (clipToRender.isFlippedV) -1f else 1f
+                                }
+                        )
 
                         // Top Left: Status Indicators
                         Row(
@@ -909,8 +993,8 @@ fun VideoEditorScreen(viewModel: WsEditorViewModel) {
                                         .clickable { viewModel.selectClip(index) }
                                 ) {
                                     // Filmstrip of continuous thumbnail tiles across entire clip duration
-                                    val tileWidthDp = 52.dp
-                                    val tileCount = (clipWidthDp.value / tileWidthDp.value).toInt().coerceAtLeast(1)
+                                    val tileWidthDp = 44.dp
+                                    val tileCount = (clipWidthDp.value / tileWidthDp.value).roundToInt().coerceAtLeast(6)
                                     val thumbnailTimes = remember(clip.id, clip.trimStartMs, clip.trimEndMs, tileCount) {
                                         VideoFrameProvider.getClipThumbnailTimes(clip, tileCount)
                                     }
@@ -1947,11 +2031,10 @@ private fun VideoThumbnailTile(
                 contentScale = ContentScale.Crop
             )
         } else {
-            AsyncImage(
-                model = uriString,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF1A1D24))
             )
         }
     }

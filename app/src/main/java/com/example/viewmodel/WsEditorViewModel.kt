@@ -436,38 +436,31 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
         _playheadMs.value = ms.coerceIn(0L, total)
     }
 
+    fun updatePlayheadFromPlayer(ms: Long) {
+        val total = totalVideoDurationMs.coerceAtLeast(100L)
+        _playheadMs.value = ms.coerceIn(0L, total)
+    }
+
+    fun setPlaying(playing: Boolean) {
+        _isPlaying.value = playing
+        if (!playing) {
+            playbackJob?.cancel()
+            playbackJob = null
+        }
+    }
+
     fun togglePlayback() {
         if (_isPlaying.value) {
-            pausePlayback()
+            _isPlaying.value = false
         } else {
-            startPlayback()
-        }
-    }
-
-    private fun startPlayback() {
-        _isPlaying.value = true
-        playbackJob?.cancel()
-        playbackJob = viewModelScope.launch {
-            var lastTime = System.currentTimeMillis()
-            while (_isPlaying.value) {
-                delay(30)
-                val now = System.currentTimeMillis()
-                val elapsed = (now - lastTime).coerceIn(1L, 100L)
-                lastTime = now
-                val total = totalVideoDurationMs.coerceAtLeast(100L)
-                val next = _playheadMs.value + elapsed
-                if (next >= total) {
-                    _playheadMs.value = 0L
-                    _isPlaying.value = false
-                    break
-                } else {
-                    _playheadMs.value = next
-                }
+            if (_playheadMs.value >= totalVideoDurationMs - 100L) {
+                _playheadMs.value = 0L
             }
+            _isPlaying.value = true
         }
     }
 
-    private fun pausePlayback() {
+    fun pausePlayback() {
         _isPlaying.value = false
         playbackJob?.cancel()
         playbackJob = null
