@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ProjectDao {
-    @Query("SELECT * FROM projects WHERE isDeleted = 0 AND isDraft = 0 ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM projects WHERE isDeleted = 0 ORDER BY updatedAt DESC")
     fun getRecentProjects(): Flow<List<ProjectEntity>>
 
     @Query("SELECT * FROM projects WHERE isDeleted = 0 AND isDraft = 1 ORDER BY updatedAt DESC")

@@ -23,6 +23,9 @@ import com.example.model.SubtitleItem
 import com.example.model.TransitionType
 import com.example.model.VideoClip
 import com.example.monetization.MonetizationManager
+import com.example.model.VisualEffectPreset
+import com.example.util.MediaStorageHelper
+import com.example.util.ProjectJsonHelper
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,6 +49,7 @@ enum class VideoEditorTool {
     TRIM_SPLIT,
     SPEED,
     TRANSFORM,
+    EFFECTS,
     FILTERS,
     ADJUST,
     AUDIO,
@@ -59,6 +63,7 @@ enum class VideoEditorTool {
 enum class PhotoEditorTool {
     NONE,
     CROP_TRANSFORM,
+    EFFECTS,
     FILTERS,
     ADJUST,
     DRAW,
@@ -286,32 +291,44 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
 
     fun createVideoProject(uris: List<Uri>, projectName: String = "WS Video Project") {
         viewModelScope.launch {
-            val clips = uris.mapIndexed { index, uri ->
-                val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+            val context = getApplication<Application>()
+            val persistentClips = uris.mapIndexed { index, uri ->
+                val localPath = MediaStorageHelper.persistMediaLocally(context, uri, "vid_clip_${index + 1}")
+                val realDuration = VideoFrameProvider.getVideoDurationMs(context, localPath)
                 val duration = if (realDuration > 0L) realDuration else 10000L
                 VideoClip(
-                    uriString = uri.toString(),
+                    uriString = localPath,
                     name = "Clip ${index + 1}",
                     originalDurationMs = duration,
                     trimStartMs = 0L,
                     trimEndMs = duration
                 )
             }
-            _videoClips.value = clips
+            _videoClips.value = persistentClips
             _selectedClipIndex.value = 0
             _playheadMs.value = 0L
             _audioTracks.value = emptyList()
             _subtitles.value = emptyList()
             _aspectRatio.value = AspectRatioOption.RATIO_16_9
 
-            val totalDur = clips.sumOf { it.effectiveDurationMs }
+            val totalDur = persistentClips.sumOf { it.effectiveDurationMs }
+            val thumb = persistentClips.firstOrNull()?.uriString
+            val projectData = ProjectJsonHelper.serializeVideoProject(
+                clips = persistentClips,
+                audioTracks = emptyList(),
+                subtitles = emptyList(),
+                aspectRatio = AspectRatioOption.RATIO_16_9,
+                playheadMs = 0L
+            )
             val newEntity = ProjectEntity(
                 title = projectName,
                 type = "VIDEO",
-                thumbnailUri = uris.firstOrNull()?.toString(),
+                thumbnailUri = thumb,
                 aspectRatio = "16:9",
                 durationMs = totalDur,
-                isDraft = false
+                isDraft = false,
+                mediaUrisJson = org.json.JSONArray(persistentClips.map { it.uriString }).toString(),
+                projectDataJson = projectData
             )
             val id = repository.saveProject(newEntity)
             _activeProject.value = newEntity.copy(id = id)
@@ -321,16 +338,21 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
 
     fun createPhotoProject(uri: Uri, projectName: String = "WS Photo Project") {
         viewModelScope.launch {
-            val photoState = PhotoEditState(uriString = uri.toString())
+            val context = getApplication<Application>()
+            val localPath = MediaStorageHelper.persistMediaLocally(context, uri, "photo_project")
+            val photoState = PhotoEditState(uriString = localPath, originalUriString = localPath)
             _photoEditState.value = photoState
             _drawingPaths.value = emptyList()
 
+            val projectData = ProjectJsonHelper.serializePhotoProject(photoState, emptyList())
             val newEntity = ProjectEntity(
                 title = projectName,
                 type = "PHOTO",
-                thumbnailUri = uri.toString(),
+                thumbnailUri = localPath,
                 aspectRatio = "1:1",
-                isDraft = false
+                isDraft = false,
+                mediaUrisJson = org.json.JSONArray(listOf(localPath)).toString(),
+                projectDataJson = projectData
             )
             val id = repository.saveProject(newEntity)
             _activeProject.value = newEntity.copy(id = id)
@@ -341,27 +363,51 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     fun openExistingProject(project: ProjectEntity) {
         viewModelScope.launch {
             _activeProject.value = project
+            val context = getApplication<Application>()
             if (project.type == "VIDEO") {
-                // Restore or initialize clips with real duration
-                val realDur = if (project.durationMs > 0L) {
-                    project.durationMs
+                val parsed = ProjectJsonHelper.deserializeVideoProject(project.projectDataJson)
+                if (parsed != null && parsed.clips.isNotEmpty()) {
+                    _videoClips.value = parsed.clips
+                    _audioTracks.value = parsed.audioTracks
+                    _subtitles.value = parsed.subtitles
+                    _aspectRatio.value = parsed.aspectRatio
+                    _selectedClipIndex.value = 0
+                    _playheadMs.value = parsed.playheadMs.coerceIn(0L, parsed.clips.sumOf { it.effectiveDurationMs }.coerceAtLeast(100L))
                 } else {
-                    VideoFrameProvider.getVideoDurationMs(getApplication(), project.thumbnailUri ?: "")
+                    // Fallback to thumbnail uri or media list
+                    val uriToUse = project.thumbnailUri ?: ""
+                    val realDur = if (project.durationMs > 0L) {
+                        project.durationMs
+                    } else {
+                        VideoFrameProvider.getVideoDurationMs(context, uriToUse)
+                    }
+                    val finalDuration = if (realDur > 0L) realDur else 10000L
+                    val clip = VideoClip(
+                        uriString = uriToUse,
+                        name = project.title,
+                        originalDurationMs = finalDuration,
+                        trimStartMs = 0L,
+                        trimEndMs = finalDuration
+                    )
+                    _videoClips.value = listOf(clip)
+                    _selectedClipIndex.value = 0
+                    _playheadMs.value = 0L
+                    _audioTracks.value = emptyList()
+                    _subtitles.value = emptyList()
                 }
-                val finalDuration = if (realDur > 0L) realDur else 10000L
-                val dummyClip = VideoClip(
-                    uriString = project.thumbnailUri ?: "",
-                    name = project.title,
-                    originalDurationMs = finalDuration,
-                    trimStartMs = 0L,
-                    trimEndMs = finalDuration
-                )
-                _videoClips.value = listOf(dummyClip)
-                _selectedClipIndex.value = 0
-                _playheadMs.value = 0L
                 _currentScreen.value = ScreenState.VIDEO_EDITOR
             } else {
-                _photoEditState.value = PhotoEditState(uriString = project.thumbnailUri ?: "")
+                val parsed = ProjectJsonHelper.deserializePhotoProject(project.projectDataJson)
+                if (parsed != null) {
+                    _photoEditState.value = parsed.state
+                    _drawingPaths.value = parsed.drawingPaths
+                } else {
+                    _photoEditState.value = PhotoEditState(
+                        uriString = project.thumbnailUri ?: "",
+                        originalUriString = project.thumbnailUri ?: ""
+                    )
+                    _drawingPaths.value = emptyList()
+                }
                 _currentScreen.value = ScreenState.PHOTO_EDITOR
             }
         }
@@ -370,14 +416,48 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     fun saveCurrentProject(asDraft: Boolean = false) {
         val proj = _activeProject.value ?: return
         viewModelScope.launch {
-            val updated = proj.copy(
-                updatedAt = System.currentTimeMillis(),
-                durationMs = if (proj.type == "VIDEO") totalVideoDurationMs else 0L,
-                aspectRatio = _aspectRatio.value.label,
-                isDraft = asDraft
-            )
-            repository.updateProject(updated)
-            _activeProject.value = updated
+            try {
+                val updated = if (proj.type == "VIDEO") {
+                    val clips = _videoClips.value
+                    val thumb = clips.firstOrNull()?.uriString ?: proj.thumbnailUri
+                    val dataJson = ProjectJsonHelper.serializeVideoProject(
+                        clips = clips,
+                        audioTracks = _audioTracks.value,
+                        subtitles = _subtitles.value,
+                        aspectRatio = _aspectRatio.value,
+                        playheadMs = _playheadMs.value
+                    )
+                    val mediaJson = org.json.JSONArray(clips.map { it.uriString }).toString()
+                    proj.copy(
+                        updatedAt = System.currentTimeMillis(),
+                        durationMs = totalVideoDurationMs,
+                        thumbnailUri = thumb,
+                        aspectRatio = _aspectRatio.value.label,
+                        isDraft = asDraft,
+                        mediaUrisJson = mediaJson,
+                        projectDataJson = dataJson
+                    )
+                } else {
+                    val state = _photoEditState.value ?: return@launch
+                    val dataJson = ProjectJsonHelper.serializePhotoProject(
+                        state = state,
+                        drawingPaths = _drawingPaths.value
+                    )
+                    val mediaJson = org.json.JSONArray(listOf(state.uriString)).toString()
+                    proj.copy(
+                        updatedAt = System.currentTimeMillis(),
+                        thumbnailUri = state.uriString,
+                        aspectRatio = state.aspectRatio.label,
+                        isDraft = asDraft,
+                        mediaUrisJson = mediaJson,
+                        projectDataJson = dataJson
+                    )
+                }
+                repository.updateProject(updated)
+                _activeProject.value = updated
+            } catch (e: Throwable) {
+                android.util.Log.e("WsEditorViewModel", "Failed saving project: ${e.message}", e)
+            }
         }
     }
 
@@ -621,6 +701,28 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun applyEffectToSelectedClip(effect: VisualEffectPreset) {
+        val index = _selectedClipIndex.value
+        val list = _videoClips.value.toMutableList()
+        if (index in list.indices) {
+            pushUndoState()
+            list[index] = list[index].copy(effect = effect)
+            _videoClips.value = list
+            autoSaveCurrentProject()
+        }
+    }
+
+    fun setEffectIntensity(intensity: Float) {
+        val index = _selectedClipIndex.value
+        val list = _videoClips.value.toMutableList()
+        if (index in list.indices) {
+            val safe = intensity.coerceIn(0f, 1f)
+            list[index] = list[index].copy(effectIntensity = safe)
+            _videoClips.value = list
+            autoSaveCurrentProject()
+        }
+    }
+
     fun updateColorAdjustment(
         brightness: Float? = null,
         contrast: Float? = null,
@@ -723,14 +825,16 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
 
     fun addMediaClips(uris: List<Uri>) {
         viewModelScope.launch {
+            val context = getApplication<Application>()
             pushUndoState()
             val current = _videoClips.value.toMutableList()
-            uris.forEachIndexed { _, uri ->
-                val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+            uris.forEachIndexed { index, uri ->
+                val localPath = MediaStorageHelper.persistMediaLocally(context, uri, "added_clip_${current.size + index + 1}")
+                val realDuration = VideoFrameProvider.getVideoDurationMs(context, localPath)
                 val duration = if (realDuration > 0L) realDuration else 10000L
                 current.add(
                     VideoClip(
-                        uriString = uri.toString(),
+                        uriString = localPath,
                         name = "Clip ${current.size + 1}",
                         originalDurationMs = duration,
                         trimStartMs = 0L,
@@ -745,12 +849,14 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
 
     fun importAudioFile(uri: Uri, title: String = "Imported Music") {
         viewModelScope.launch {
+            val context = getApplication<Application>()
             pushUndoState()
-            val realDuration = VideoFrameProvider.getVideoDurationMs(getApplication(), uri.toString())
+            val localPath = MediaStorageHelper.persistMediaLocally(context, uri, "audio_track")
+            val realDuration = VideoFrameProvider.getVideoDurationMs(context, localPath)
             val duration = if (realDuration > 0L) realDuration else totalVideoDurationMs.coerceAtLeast(15000L)
             val track = AudioTrackItem(
                 title = title,
-                uriString = uri.toString(),
+                uriString = localPath,
                 startTimelineMs = _playheadMs.value,
                 durationMs = duration,
                 isVoiceRecording = false
@@ -938,9 +1044,25 @@ class WsEditorViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun replacePhotoUri(newUri: Uri) {
+        val context = getApplication<Application>()
+        val localPath = MediaStorageHelper.persistMediaLocally(context, newUri, "photo_replaced")
         pushPhotoUndoState()
         val curr = _photoEditState.value ?: return
-        _photoEditState.value = curr.copy(uriString = newUri.toString())
+        _photoEditState.value = curr.copy(uriString = localPath, originalUriString = localPath)
+        autoSaveCurrentProject()
+    }
+
+    fun applyEffectToPhoto(effect: VisualEffectPreset) {
+        pushPhotoUndoState()
+        val curr = _photoEditState.value ?: return
+        _photoEditState.value = curr.copy(effect = effect)
+        autoSaveCurrentProject()
+    }
+
+    fun setPhotoEffectIntensity(intensity: Float) {
+        val curr = _photoEditState.value ?: return
+        val safe = intensity.coerceIn(0f, 1f)
+        _photoEditState.value = curr.copy(effectIntensity = safe)
         autoSaveCurrentProject()
     }
 

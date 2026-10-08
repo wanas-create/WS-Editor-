@@ -63,7 +63,9 @@ data class VideoClip(
     val pipScale: Float = 0.4f,
     val pipOffsetX: Float = 0.25f,
     val pipOffsetY: Float = 0.25f,
-    val transition: TransitionType = TransitionType.NONE
+    val transition: TransitionType = TransitionType.NONE,
+    val effect: VisualEffectPreset = VisualEffectPreset.NONE,
+    val effectIntensity: Float = 1.0f // 0.0f to 1.0f (0% to 100%)
 ) {
     val effectiveDurationMs: Long
         get() = (((trimEndMs - trimStartMs).coerceAtLeast(100L)) / speed).toLong()
@@ -141,6 +143,8 @@ data class PhotoEditState(
     val isBgRemoved: Boolean = false,
     val backgroundReplacement: String? = null, // Color hex or style
     val isAiEnhanced: Boolean = false,
+    val effect: VisualEffectPreset = VisualEffectPreset.NONE,
+    val effectIntensity: Float = 1.0f, // 0.0f to 1.0f (0% to 100%)
     val textOverlays: List<PhotoTextOverlay> = emptyList()
 )
 
